@@ -1,0 +1,236 @@
+import re
+import numpy as np
+import pandas as pd
+from urllib.parse import urlparse
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
+
+def generate_synthetic_emails(n_samples: int = 1000, seed: int = 42) -> pd.DataFrame:
+    """Generate a balanced dataset of phishing and legitimate emails."""
+    np.random.seed(seed)
+
+    phishing_subjects = [
+        "Urgent: Verify your account immediately",
+        "Your account has been compromised",
+        "Action required: Update payment info",
+        "You've won a prize! Claim now",
+        "Security alert: Unusual login detected",
+        "Password reset required immediately",
+        "Your package could not be delivered",
+        "Invoice attached - payment overdue",
+    ]
+
+    legitimate_subjects = [
+        "Meeting tomorrow at 10am",
+        "Project update - Q3 results",
+        "Team lunch this Friday",
+        "Your order has shipped",
+        "Weekly newsletter",
+        "Invitation to conference",
+        "Document shared with you",
+        "Reminder: Dentist appointment",
+    ]
+
+    phishing_bodies = [
+        "Click here immediately to verify: [secure-login.fake-bank.xyz](http://secure-login.fake-bank.xyz/verify)",
+        "Your account will be suspended. Update now: [bit.ly](http://bit.ly/3xPhish)",
+        "Congratulations! Claim your $1000 gift card: [free-prize.ru](http://free-prize.ru/claim)",
+        "We detected unusual activity. Confirm identity: [192.168.1.1](http://192.168.1.1/login)",
+        "Dear customer, verify SSN to avoid account closure: [amaz0n-secure.tk](http://amaz0n-secure.tk)",
+        "URGENT: Wire transfer needed. Reply with bank details immediately.",
+        "Download invoice: [malware-site.cn](http://malware-site.cn/invoice.exe)",
+        "Reset password here: [g00gle-security.ml](http://g00gle-security.ml/reset?id=12345)",
+    ]
+
+    legitimate_bodies = [
+        "Hi team, let's meet tomorrow at 10am in conference room B.",
+        "Please find attached the Q3 results summary. Let me know if you have questions.",
+        "Hey! We're doing team lunch at the Italian place on Friday. Are you in?",
+        "Your order #12345 has shipped and will arrive by Thursday.",
+        "Here's this week's newsletter with updates from the company.",
+        "You're invited to our annual conference on September 15th.",
+        "I've shared a document with you in Google Drive. Please review when you can.",
+        "Just a reminder about your dentist appointment next Tuesday at 3pm.",
+    ]
+
+    phishing_urls = [
+        "[secure-login.fake-bank.xyz](http://secure-login.fake-bank.xyz/verify)",
+        "[bit.ly](http://bit.ly/3xPhish)",
+        "[free-prize.ru](http://free-prize.ru/claim)",
+        "[192.168.1.1](http://192.168.1.1/login)",
+        "[amaz0n-secure.tk](http://amaz0n-secure.tk/verify)",
+        "[malware-site.cn](http://malware-site.cn/invoice.exe)",
+        "[g00gle-security.ml](http://g00gle-security.ml/reset)",
+        "[paypa1-secure.xyz](http://paypa1-secure.xyz/confirm)",
+    ]
+
+    legitimate_urls = [
+        "[google.com](https://www.google.com)",
+        "[docs.google.com](https://docs.google.com/document/d/abc123)",
+        "[amazon.com](https://www.amazon.com/orders/12345)",
+        "[linkedin.com](https://www.linkedin.com/in/johndoe)",
+        "[github.com](https://github.com/user/repo)",
+        "",  # No URL
+        "[zoom.us](https://zoom.us/j/123456789)",
+        "[company.com](https://www.company.com/newsletter)",
+    ]
+
+    data = []
+    half = n_samples // 2
+
+    for _ in range(half):
+        data.append({
+            "subject": np.random.choice(phishing_subjects),
+            "body": np.random.choice(phishing_bodies),
+            "urls": np.random.choice(phishing_urls),
+            "label": 1,  # Phishing
+        })
+
+    for _ in range(half):
+        data.append({
+            "subject": np.random.choice(legitimate_subjects),
+            "body": np.random.choice(legitimate_bodies),
+            "urls": np.random.choice(legitimate_urls),
+            "label": 0,  # Safe
+        })
+
+    return pd.DataFrame(data).sample(frac=1, random_state=seed).reset_index(drop=True)
+
+
+
+class EmailFeatureExtractor:
+    """Extract handcrafted features from email text and URLs."""
+
+    PHISHING_KEYWORDS = [
+        "urgent", "verify", "suspend", "password", "click", "immediately",
+        "account", "confirm", "security", "alert", "update", "login",
+        "ssn", "bank", "wire", "transfer", "prize", "winner", "congratulations",
+        "limited", "expire", "act now", "free", "gift", "claim",
+    ]
+
+    SUSPICIOUS_TLDS = [".xyz", ".tk", ".ml", ".ga", ".cf", ".ru", ".cn", ".top"]
+
+    def extract(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Return a DataFrame of extracted features."""
+        features = pd.DataFrame()
+
+        # Combine subject + body for text analysis
+        combined_text = (df["subject"] + " " + df["body"]).str.lower()
+
+        # Keyword counts
+        for kw in self.PHISHING_KEYWORDS:
+            features[f"kw_{kw}"] = combined_text.str.count(rf"\b{kw}\b")
+
+        # Text statistics
+        features["char_count"] = combined_text.str.len()
+        features["word_count"] = combined_text.str.split().str.len()
+        features["exclamation_count"] = combined_text.str.count("!")
+        features["uppercase_ratio"] = combined_text.apply(
+            lambda x: sum(1 for c in x if c.isupper()) / max(len(x), 1)
+        )
+
+        # URL-based features
+        features["url_count"] = df["urls"].apply(lambda x: len(re.findall(r"https?://", str(x))))
+        features["has_ip_url"] = df["urls"].apply(
+            lambda x: int(bool(re.search(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", str(x))))
+        )
+        features["suspicious_tld"] = df["urls"].apply(
+            lambda x: int(any(tld in str(x).lower() for tld in self.SUSPICIOUS_TLDS))
+        )
+        features["url_length"] = df["urls"].apply(lambda x: len(str(x)))
+        features["has_shortened_url"] = df["urls"].apply(
+            lambda x: int(bool(re.search(r"bit\.ly|tinyurl|goo\.gl|t\.co", str(x).lower())))
+        )
+
+        return features
+
+
+
+
+def train_and_evaluate(df: pd.DataFrame) -> None:
+    """Train a classifier and display evaluation metrics."""
+
+    # Extract features
+    extractor = EmailFeatureExtractor()
+    X_handcrafted = extractor.extract(df)
+
+    # TF-IDF on combined text
+    combined_text = df["subject"] + " " + df["body"]
+    tfidf = TfidfVectorizer(max_features=200, stop_words="english", ngram_range=(1, 2))
+    X_tfidf = tfidf.fit_transform(combined_text)
+
+    # Combine handcrafted + TF-IDF features
+    X = np.hstack([X_handcrafted.values, X_tfidf.toarray()])
+    y = df["label"].values
+
+    # Train/test split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    # Train Random Forest
+    clf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+    clf.fit(X_train, y_train)
+
+    # Predictions
+    y_pred = clf.predict(X_test)
+
+    # ── Results ──
+    accuracy = accuracy_score(y_test, y_pred)
+    cm = confusion_matrix(y_test, y_pred)
+
+    print("=" * 50)
+    print("PHISHING EMAIL DETECTION - RESULTS")
+    print("=" * 50)
+    print(f"\n✓ Accuracy: {accuracy:.2%}\n")
+    print("Classification Report:")
+    print(classification_report(y_test, y_pred, target_names=["Safe", "Phishing"]))
+
+    # Plot confusion matrix
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=["Safe", "Phishing"],
+        yticklabels=["Safe", "Phishing"],
+    )
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.title(f"Confusion Matrix (Accuracy: {accuracy:.2%})")
+    plt.tight_layout()
+    plt.savefig("confusion_matrix.png", dpi=150)
+    plt.show()
+
+    # Feature importance (top 15)
+    feature_names = list(X_handcrafted.columns) + list(tfidf.get_feature_names_out())
+    importances = clf.feature_importances_
+    top_idx = np.argsort(importances)[-15:]
+
+    plt.figure(figsize=(10, 6))
+    plt.barh([feature_names[i] for i in top_idx], importances[top_idx], color="steelblue")
+    plt.xlabel("Importance")
+    plt.title("Top 15 Most Important Features")
+    plt.tight_layout()
+    plt.savefig("feature_importance.png", dpi=150)
+    plt.show()
+
+
+
+if __name__ == "__main__":
+    # Generate synthetic data (replace with real dataset)
+    print("Generating synthetic email dataset...")
+    emails_df = generate_synthetic_emails(n_samples=2000)
+
+    print(f"Dataset size: {len(emails_df)} emails")
+    print(f"Class distribution:\n{emails_df['label'].value_counts().rename({0: 'Safe', 1: 'Phishing'})}\n")
+
+    # Train and evaluate
+    train_and_evaluate(emails_df)
